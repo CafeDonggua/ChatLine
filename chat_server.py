@@ -39,14 +39,6 @@ class ChatServer:
                     except Exception:
                         pass
                     c.close()
-
-            if name:
-                print(f"[SERVER] LEAVE {name}")
-                self._broadcast({
-                    "type": "system",
-                    "text": f"{name} left",
-                    "ts": self._ts_now()
-                })
             self.sock.close()
 
     def _accept_loop(self):
@@ -134,12 +126,13 @@ class ChatServer:
             except Exception:
                 pass
             if name:
+                print(f"[SERVER] LEAVE {name}")
                 self._broadcast({
                     "type": "system",
                     "text": f"{name} left",
                     "ts": self._ts_now()
                 })
-
+                
     @staticmethod
     def _ts_now():
         # 格式 mm.dd hh:mm
