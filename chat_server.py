@@ -39,6 +39,14 @@ class ChatServer:
                     except Exception:
                         pass
                     c.close()
+
+            if name:
+                print(f"[SERVER] LEAVE {name}")
+                self._broadcast({
+                    "type": "system",
+                    "text": f"{name} left",
+                    "ts": self._ts_now()
+                })
             self.sock.close()
 
     def _accept_loop(self):
