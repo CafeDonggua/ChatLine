@@ -1,5 +1,6 @@
 # chat_server.py
 import socket
+import ssl
 import threading
 import json
 import datetime
@@ -9,13 +10,15 @@ ENC = "utf-8"
 BUFSZ = 4096
 
 class ChatServer:
-    def __init__(self, host: str, port: int):
+    def __init__(self, host: str, port: int, certfile: str, keyfile: str):
         self.addr = (host, port)
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.clients = {}       # conn -> {"name": str, "addr": (ip, port)}
         self.lock = threading.Lock()
         self.running = True
+        self.ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        self.ssl_ctx.load_cert_chain(certfile=certfile, keyfile=keyfile)
 
     def start(self):
         self.sock.bind(self.addr)
@@ -47,7 +50,13 @@ class ChatServer:
                 conn, caddr = self.sock.accept()
             except OSError:
                 break
-            threading.Thread(target=self._handle_client, args=(conn, caddr), daemon=True).start()
+            try:
+                tls_conn = self.ssl_ctx.wrap_socket(conn, server_side=True)
+            except ssl.SSLError as err:
+                print(f"[SERVER] TLS handshake failed for {caddr}: {err}")
+                conn.close()
+                continue
+            threading.Thread(target=self._handle_client, args=(tls_conn, caddr), daemon=True).start()
 
     def _broadcast(self, payload: dict, exclude_conn=None):
         data = (json.dumps(payload) + "\n").encode(ENC)
@@ -142,9 +151,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default="0.0.0.0", help="bind host (default: 0.0.0.0)")
     ap.add_argument("--port", type=int, default=5050, help="port (default: 5050)")
+    ap.add_argument("--cert", required=True, help="path to TLS certificate (PEM)")
+    ap.add_argument("--key", required=True, help="path to TLS private key (PEM)")
     args = ap.parse_args()
-    ChatServer(args.host, args.port).start()
+    ChatServer(args.host, args.port, args.cert, args.key).start()
 
 if __name__ == "__main__":
     main()
-
