@@ -7,8 +7,11 @@ import json
 import argparse
 import datetime
 import unicodedata
+import platform
+import time
+import ctypes
 from dataclasses import dataclass
-from typing import Callable, List
+from typing import Callable, List, Optional
 
 from prompt_toolkit import Application
 from prompt_toolkit.layout import HSplit, Window, Layout
@@ -19,6 +22,11 @@ from prompt_toolkit.styles import Style
 from prompt_toolkit.application.current import get_app
 from prompt_toolkit.mouse_events import MouseEventType
 from wcwidth import wcswidth
+
+if platform.system() == "Windows":
+    from ctypes import wintypes
+else:
+    wintypes = None
 
 ENC = "utf-8"
 
@@ -89,6 +97,260 @@ def clip_by_width(s: str, maxw: int) -> str:
         w += cw
     return "".join(out)
 
+
+class TaskbarFlasher:
+    """Windows 專用工作列閃動控制器，非 Windows 上為 no-op。"""
+
+    _THROTTLE_SECONDS = 1.0
+    _FOCUS_POLL_INTERVAL = 0.5
+    def __init__(self, debug: bool = False) -> None:
+        self.enabled = False
+        self.is_flashing = False
+        self.has_focus = True
+        self.hwnd = 0
+        self._lock = threading.Lock()
+        self._last_trigger = 0.0
+        self._running = False
+        self._focus_thread: Optional[threading.Thread] = None
+        self._user32 = None
+        self._kernel32 = None
+        self._flashwinfo_cls = None
+        self._debug = debug and platform.system() == "Windows"
+        self._setup()
+
+    def _setup(self) -> None:
+        if platform.system() != "Windows" or wintypes is None:
+            return
+        try:
+            self._user32 = ctypes.windll.user32
+            self._kernel32 = ctypes.windll.kernel32
+        except Exception:
+            return
+
+        try:
+            self.FLASHW_STOP = 0
+            self.FLASHW_CAPTION = 0x00000001
+            self.FLASHW_TRAY = 0x00000002
+            self.FLASHW_ALL = self.FLASHW_CAPTION | self.FLASHW_TRAY
+            self.FLASHW_TIMER = 0x00000004
+            self.FLASHW_TIMERNOFG = 0x0000000C
+
+            class FLASHWINFO(ctypes.Structure):
+                _fields_ = [
+                    ("cbSize", ctypes.c_uint),
+                    ("hwnd", wintypes.HWND),
+                    ("dwFlags", ctypes.c_uint),
+                    ("uCount", ctypes.c_uint),
+                    ("dwTimeout", ctypes.c_uint),
+                ]
+
+            self._flashwinfo_cls = FLASHWINFO
+            if not self._ensure_hwnd(force=True):
+                self._debug_print("setup", "未取得 hwnd，停用")
+                return
+            self.enabled = True
+            self._debug_print("setup", f"啟用成功 hwnd=0x{int(self.hwnd):X}")
+            self.refresh_focus()
+        except Exception:
+            self.enabled = False
+            self.hwnd = 0
+            self._debug_print("setup", "初始化失敗，停用")
+
+    def start(self) -> None:
+        if not self.enabled or self._running:
+            return
+        self._running = True
+        self._focus_thread = threading.Thread(target=self._focus_loop, daemon=True)
+        self._focus_thread.start()
+        self._debug_print("thread", "焦點監控啟動")
+
+    def shutdown(self) -> None:
+        if not self.enabled:
+            return
+        self._running = False
+        self.stop()
+        self._debug_print("thread", "焦點監控停止")
+
+    def _focus_loop(self) -> None:
+        while self._running:
+            try:
+                self.refresh_focus()
+            except Exception:
+                pass
+            time.sleep(self._FOCUS_POLL_INTERVAL)
+
+    def refresh_focus(self) -> bool:
+        if not self.enabled or not self._user32:
+            return False
+        if not self._ensure_hwnd():
+            self._debug_print("focus", "未取得 hwnd，視為無焦點")
+            self.has_focus = False
+            return False
+        try:
+            fg = self._user32.GetForegroundWindow()
+        except Exception:
+            return self.has_focus
+        focus = bool(fg) and fg == self.hwnd
+        should_stop = False
+        with self._lock:
+            if focus != self.has_focus:
+                self.has_focus = focus
+                self._debug_print(
+                    "focus",
+                    f"fg=0x{int(fg) if fg else 0:X} hwnd=0x{int(self.hwnd):X} focus={focus}",
+                )
+            if focus and self.is_flashing:
+                should_stop = True
+        if should_stop:
+            self.stop()
+        return focus
+
+    def maybe_flash(self, at_bottom: bool) -> None:
+        if not self.enabled:
+            return
+        focus = self.refresh_focus()
+        self._debug_print(
+            "maybe",
+            f"focus={focus} at_bottom={at_bottom} flashing={self.is_flashing} now={time.monotonic():.2f} last={self._last_trigger:.2f}",
+        )
+        if focus and at_bottom:
+            self._debug_print("maybe", "略過：前景且在底部")
+            return
+        now = time.monotonic()
+        with self._lock:
+            if self.is_flashing:
+                self._debug_print("maybe", "略過：已在閃動")
+                return
+            if now - self._last_trigger < self._THROTTLE_SECONDS:
+                self._debug_print("maybe", f"略過：節流 {now - self._last_trigger:.2f}s")
+                return
+            if not self._flashwinfo_cls:
+                self._debug_print("maybe", "略過：缺少 flash 結構")
+                return
+            if self._flash(self.FLASHW_ALL | self.FLASHW_TIMERNOFG):
+                self.is_flashing = True
+                self._last_trigger = now
+                self._debug_print("maybe", "已觸發閃動")
+
+    def stop(self) -> None:
+        if not self.enabled:
+            return
+        with self._lock:
+            self._stop_flash_locked()
+
+    def _stop_flash_locked(self) -> None:
+        if not self.is_flashing or not self._flashwinfo_cls:
+            return
+        self._flash(self.FLASHW_STOP)
+        self.is_flashing = False
+        self._last_trigger = time.monotonic()
+        self._debug_print("stop", f"停止 flags=STOP hwnd=0x{int(self.hwnd):X}")
+
+    def _flash(self, flags: int) -> bool:
+        if not self.enabled or not self._flashwinfo_cls or not self._user32:
+            return False
+        if not self._ensure_hwnd():
+            return False
+        info = self._flashwinfo_cls()
+        info.cbSize = ctypes.sizeof(info)
+        info.hwnd = self.hwnd
+        info.dwFlags = flags
+        info.uCount = 0
+        info.dwTimeout = 0
+        try:
+            self._user32.FlashWindowEx(ctypes.byref(info))
+            self._debug_print(
+                "flash",
+                f"flags=0x{flags:X} hwnd=0x{int(self.hwnd):X} is_flashing={self.is_flashing}",
+            )
+        except Exception:
+            self._debug_print("flash", "呼叫失敗")
+            return False
+        return True
+
+    def _ensure_hwnd(self, force: bool = False) -> bool:
+        if not self._user32:
+            return False
+        if self.hwnd and not force:
+            try:
+                if self._user32.IsWindow(self.hwnd):
+                    self._debug_print("ensure_hwnd", f"沿用 hwnd=0x{int(self.hwnd):X}")
+                    return True
+            except Exception:
+                pass
+        hwnd = 0
+        console_hwnd = 0
+        if self._kernel32:
+            try:
+                console_hwnd = self._kernel32.GetConsoleWindow()
+            except Exception:
+                console_hwnd = 0
+        if console_hwnd:
+            hwnd = console_hwnd
+        if not hwnd:
+            try:
+                fg = self._user32.GetForegroundWindow()
+                if fg and self._user32.IsWindow(fg):
+                    hwnd = fg
+            except Exception:
+                hwnd = 0
+        if hwnd:
+            resolved = self._resolve_flash_hwnd(hwnd)
+            self.hwnd = resolved
+            self._debug_print(
+                "ensure_hwnd",
+                f"console=0x{int(console_hwnd):X} candidate=0x{int(hwnd):X} resolved=0x{int(resolved):X}",
+            )
+            return True
+        self._debug_print(
+            "ensure_hwnd",
+            f"console=0x{int(console_hwnd):X} selected=0x0 取得失敗",
+        )
+        return False
+
+    def _debug_print(self, tag: str, msg: str) -> None:
+        if not self._debug:
+            return
+        try:
+            print(f"[FLASH] {tag}: {msg}")
+        except Exception:
+            pass
+
+    def _resolve_flash_hwnd(self, hwnd: int) -> int:
+        if not hwnd or not self._user32:
+            return hwnd
+        GA_ROOT = 2
+        GA_ROOTOWNER = 3
+        try:
+            root_owner = self._user32.GetAncestor(hwnd, GA_ROOTOWNER)
+        except Exception:
+            root_owner = 0
+        try:
+            root = self._user32.GetAncestor(hwnd, GA_ROOT)
+        except Exception:
+            root = 0
+        for candidate in (root_owner, root, hwnd):
+            if candidate and self._user32.IsWindow(candidate):
+                if candidate != hwnd:
+                    self._debug_print(
+                        "resolve",
+                        f"hwnd=0x{int(hwnd):X} -> 0x{int(candidate):X}",
+                    )
+                return candidate
+        return hwnd
+
+    def on_history_change(self, at_bottom: bool) -> None:
+        if not self.enabled:
+            return
+        focus = self.refresh_focus()
+        if at_bottom and focus:
+            self.stop()
+
+    def notify_user_activity(self) -> None:
+        if not self.enabled:
+            return
+        self._debug_print("input", f"停止閃動 hwnd=0x{int(self.hwnd):X}")
+        self.stop()
 
 @dataclass
 class ChatEntry:
@@ -261,7 +523,7 @@ class ChatHistoryControl(UIControl):
 
 
 class ChatClientTUI:
-    def __init__(self, host: str, port: int, name: str):
+    def __init__(self, host: str, port: int, name: str, flash_debug: bool = False):
         self.addr = (host, port)
         self.name = name
         base_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -272,8 +534,9 @@ class ChatClientTUI:
         self.running = True
 
         # UI：上方訊息窗 + 下方輸入列
+        self._flasher = TaskbarFlasher(debug=flash_debug)
         self.history = ChatHistory()
-        self.history.set_on_change(self._invalidate)
+        self.history.set_on_change(self._on_history_change)
 
         self.history_control = ChatHistoryControl(self.history)
         self.output_window = Window(
@@ -293,11 +556,16 @@ class ChatClientTUI:
             prompt="> ",
             multiline=False
         )
+        try:
+            self.input.buffer.on_text_changed += self._on_input_buffer_changed
+        except Exception:
+            pass
 
         kb = KeyBindings()
 
         @kb.add("enter")
         def _(event):
+            self._flasher.notify_user_activity()
             txt = self.input.text.strip()
             if not txt:
                 return
@@ -311,18 +579,22 @@ class ChatClientTUI:
 
         @kb.add("pageup")
         def _(event):
+            self._flasher.notify_user_activity()
             self.history.page_up()
 
         @kb.add("pagedown")
         def _(event):
+            self._flasher.notify_user_activity()
             self.history.page_down()
 
         @kb.add("c-home")
         def _(event):
+            self._flasher.notify_user_activity()
             self.history.scroll_to_top()
 
         @kb.add("c-end")
         def _(event):
+            self._flasher.notify_user_activity()
             self.history.scroll_to_bottom()
 
         root = HSplit([
@@ -348,6 +620,7 @@ class ChatClientTUI:
             self.sock.connect(self.addr)
         except Exception as e:
             print(f"[CLIENT] Connect failed: {e}")
+            self._flasher.shutdown()
             return
 
         self._send_json({"type": "join", "name": self.name})
@@ -355,20 +628,25 @@ class ChatClientTUI:
         # 開啟接收執行緒
         threading.Thread(target=self._recv_loop, daemon=True).start()
 
+        self._flasher.start()
+        self._flasher._debug_print("client", f"start enabled={self._flasher.enabled} hwnd=0x{int(self._flasher.hwnd):X}")
+
         # 起始提示
         self._append_system(f"Connected to {self.addr[0]}:{self.addr[1]} as {self.name}")
         self._append_system("Type /exit to leave.")
 
         # 進入 TUI 主迴圈
-        self.app.run()
-
-        # 清理
-        self.running = False
         try:
-            self.sock.shutdown(socket.SHUT_RDWR)
-        except Exception:
-            pass
-        self.sock.close()
+            self.app.run()
+        finally:
+            # 清理
+            self.running = False
+            try:
+                self.sock.shutdown(socket.SHUT_RDWR)
+            except Exception:
+                pass
+            self.sock.close()
+            self._flasher.shutdown()
 
     def _recv_loop(self):
         f = self.sock.makefile("r", encoding=ENC, newline="\n")
@@ -399,9 +677,11 @@ class ChatClientTUI:
             user = msg.get("name", "?")
             text = msg.get("text", "")
             self._append_entry(ChatEntry(user=user, text=text, ts=ts))
+            self._maybe_flash_for_new_entry()
         elif mtype == "system":
             text = msg.get("text", "")
             self._append_entry(ChatEntry(user="SYSTEM", text=text, ts=ts))
+            self._maybe_flash_for_new_entry()
 
     def _append_entry(self, entry: ChatEntry):
         try:
@@ -415,6 +695,35 @@ class ChatClientTUI:
                 self.app.invalidate()
         except Exception:
             pass
+
+    def _on_history_change(self) -> None:
+        self._invalidate()
+        try:
+            at_bottom = bool(self.history.follow_bottom)
+        except Exception:
+            at_bottom = True
+        snap = self.history.snapshot()
+        self._flasher._debug_print(
+            "history",
+            f"follow_bottom={at_bottom} view_start={snap.get('view_start')} view_end={snap.get('view_end')} total={snap.get('total')}",
+        )
+        self._flasher.on_history_change(at_bottom)
+
+    def _on_input_buffer_changed(self, buffer) -> None:
+        try:
+            text = buffer.text
+        except Exception:
+            text = self.input.text
+        if text and any(not ch.isspace() for ch in text):
+            self._flasher.notify_user_activity()
+
+    def _maybe_flash_for_new_entry(self) -> None:
+        try:
+            at_bottom = bool(self.history.follow_bottom)
+        except Exception:
+            at_bottom = True
+        self._flasher._debug_print("event", f"new_entry at_bottom={at_bottom}")
+        self._flasher.maybe_flash(at_bottom)
 
     def _status_text(self) -> str:
         snap = self.history.snapshot()
@@ -431,6 +740,7 @@ class ChatClientTUI:
     def _append_system(self, text: str):
         ts = datetime.datetime.now().strftime("%m.%d %H:%M")
         self._append_entry(ChatEntry(user="SYSTEM", text=text, ts=ts))
+        self._maybe_flash_for_new_entry()
 
     def _send_json(self, obj: dict):
         try:
@@ -444,8 +754,13 @@ def main():
     ap.add_argument("--host", required=True, help="server host/IP")
     ap.add_argument("--port", type=int, default=5050, help="server port (default: 5050)")
     ap.add_argument("--name", required=True, help="your user name")
+    ap.add_argument(
+        "--flash-debug",
+        action="store_true",
+        help="enable taskbar flash debug logging",
+    )
     args = ap.parse_args()
-    ChatClientTUI(args.host, args.port, args.name).start()
+    ChatClientTUI(args.host, args.port, args.name, flash_debug=args.flash_debug).start()
 
 if __name__ == "__main__":
     main()
