@@ -17,7 +17,7 @@
 
 ## 需求
 
-* Python 3.9+（建議 3.11）
+* Python 3.10+（建議 3.11）
 * 依賴套件：
 
   * `prompt_toolkit`（TUI 客戶端）
@@ -30,8 +30,16 @@
 python -m pip install --upgrade prompt_toolkit wcwidth
 ```
 
-> 若出現 `ModuleNotFoundError`，請用同一支 Python 安裝與執行：
-> `python -m pip install ...` 並以 `python` 或 `py -3.11` 啟動腳本。
+
+## TLS 憑證準備
+
+伺服器啟動前請先在與 `chat_server.py` 相同的資料夾建立自簽憑證與私鑰：
+
+```powershell
+MSYS2_ARG_CONV_EXCL='*' openssl req -x509 -newkey rsa:2048 -keyout server.key -out server.crt -days 365 -nodes -subj "/CN=chat.local"
+```
+
+完成後會得到 `server.crt` 與 `server.key`，啟動伺服器時需透過參數載入；客戶端會自動建立 TLS 連線，不需額外設定。
 
 ## 啟動方式
 
@@ -40,7 +48,7 @@ python -m pip install --upgrade prompt_toolkit wcwidth
 伺服器（視窗 A）：
 
 ```powershell
-python chat_server.py --host 127.0.0.1 --port 5050
+python chat_server.py --host 127.0.0.1 --port 5050 --cert server.crt --key server.key
 ```
 
 客戶端（視窗 B、C 各開一個）：
@@ -61,9 +69,9 @@ ipconfig   # 取 IPv4，例如 192.168.1.23
 伺服器（綁所有介面或綁該 IPv4）：
 
 ```powershell
-python chat_server.py --host 0.0.0.0 --port 5050
+python chat_server.py --host 0.0.0.0 --port 5050 --cert server.crt --key server.key
 # 或
-# python chat_server.py --host 192.168.1.23 --port 5050
+# python chat_server.py --host 192.168.1.23 --port 5050 --cert server.crt --key server.key
 ```
 
 本機客戶端：
@@ -87,12 +95,16 @@ python chat_client_tui.py --host 192.168.1.23 --port 5050 --name RemoteMe
 
   * `/exit`：離開聊天室。
 
+額外參數：
+
+* 若想觀察工作列閃爍行為的除錯資訊，可在啟動客戶端時加入 `--flash-debug`，日誌會以 `[FLASH]` 前綴顯示於終端畫面。
+
 ## 設計重點
 
 * 傳輸：TCP，訊息以 NDJSON（JSON + `\n`）傳遞。
 * 時間戳：由伺服器產生，格式 `mm.dd hh:mm`。
 * TUI 佈局：上方歷史訊息視窗，下方單行輸入列。
-* 對齊：右側時間欄採固定欄寬，並以 `wcwidth` 計算可視寬度，避免 `]` 掉行。
+* 對齊：右側時間欄採固定欄寬，並以 `wcwidth` 計算可視寬度。
 
 ## 常見問題與排錯
 
@@ -128,7 +140,7 @@ python chat_client_tui.py --host 192.168.1.23 --port 5050 --name RemoteMe
 
 ## 待辦與方向
 
-* 訊息加密（TLS/SSL 包裝）
+* 主機名驗證
 * 訊息長度限制與簡單限流
 * 房間與在線名單（/rooms, /who）
 * 歷史補送、伺服器日誌輪替
