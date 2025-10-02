@@ -1,6 +1,7 @@
 # chat_client_tui.py
 # 需求: pip install prompt_toolkit
 import socket
+import ssl
 import threading
 import json
 import argparse
@@ -88,7 +89,11 @@ class ChatClientTUI:
     def __init__(self, host: str, port: int, name: str):
         self.addr = (host, port)
         self.name = name
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        base_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.ssl_ctx = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
+        self.ssl_ctx.check_hostname = False
+        self.ssl_ctx.verify_mode = ssl.CERT_NONE
+        self.sock = self.ssl_ctx.wrap_socket(base_sock, server_hostname=host)
         self.running = True
 
         # UI：上方訊息窗 + 下方輸入列
@@ -246,4 +251,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
