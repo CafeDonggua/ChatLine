@@ -10,6 +10,8 @@ import unicodedata
 import platform
 import time
 import ctypes
+import ipaddress
+import os
 from dataclasses import dataclass
 from typing import Callable, List, Optional
 
@@ -523,14 +525,47 @@ class ChatHistoryControl(UIControl):
 
 
 class ChatClientTUI:
-    def __init__(self, host: str, port: int, name: str, flash_debug: bool = False):
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        name: str,
+        flash_debug: bool = False,
+        ca_path: Optional[str] = None,
+        server_name: Optional[str] = None,
+        insecure: bool = False,
+    ):
+        self.host = host
         self.addr = (host, port)
         self.name = name
+        self.server_name = server_name or host
+        self._verification_enabled = bool(ca_path)
+        if self._verification_enabled:
+            self._insecure_mode = False
+            self._insecure_reason = None
+        else:
+            self._insecure_mode = True
+            self._insecure_reason = "--insecure" if insecure else "未指定 --ca"
+
         base_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.ssl_ctx = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
-        self.ssl_ctx.check_hostname = False
-        self.ssl_ctx.verify_mode = ssl.CERT_NONE
-        self.sock = self.ssl_ctx.wrap_socket(base_sock, server_hostname=host)
+        if self._verification_enabled:
+            self.ssl_ctx = ssl.create_default_context(
+                ssl.Purpose.SERVER_AUTH,
+                cafile=ca_path,
+            )
+            self.ssl_ctx.check_hostname = True
+            self.sock = self.ssl_ctx.wrap_socket(
+                base_sock,
+                server_hostname=self.server_name,
+            )
+        else:
+            self.ssl_ctx = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
+            self.ssl_ctx.check_hostname = False
+            self.ssl_ctx.verify_mode = ssl.CERT_NONE
+            self.sock = self.ssl_ctx.wrap_socket(
+                base_sock,
+                server_hostname=self.server_name,
+            )
         self.running = True
 
         # UI：上方訊息窗 + 下方輸入列
@@ -618,9 +653,17 @@ class ChatClientTUI:
     def start(self):
         try:
             self.sock.connect(self.addr)
-        except Exception as e:
-            print(f"[CLIENT] Connect failed: {e}")
-            self._flasher.shutdown()
+        except ssl.SSLCertVerificationError as err:
+            self._handle_cert_error(err)
+            self._cleanup_failed_connect()
+            return
+        except ssl.SSLError as err:
+            self._handle_ssl_error(err)
+            self._cleanup_failed_connect()
+            return
+        except Exception as err:
+            print(f"[CLIENT] Connect failed: {err}")
+            self._cleanup_failed_connect()
             return
 
         self._send_json({"type": "join", "name": self.name})
@@ -634,6 +677,9 @@ class ChatClientTUI:
         # 起始提示
         self._append_system(f"Connected to {self.addr[0]}:{self.addr[1]} as {self.name}")
         self._append_system("Type /exit to leave.")
+        if self._insecure_mode:
+            reason = self._insecure_reason or "未指定 --ca"
+            self._append_system(f"警告: 目前為不驗證模式（{reason}）")
 
         # 進入 TUI 主迴圈
         try:
@@ -647,6 +693,46 @@ class ChatClientTUI:
                 pass
             self.sock.close()
             self._flasher.shutdown()
+
+    def _cleanup_failed_connect(self) -> None:
+        self.running = False
+        try:
+            self.sock.close()
+        except Exception:
+            pass
+        self._flasher.shutdown()
+
+    def _handle_cert_error(self, err: ssl.SSLCertVerificationError) -> None:
+        print("[CLIENT] TLS 憑證驗證失敗:")
+        print(f"  錯誤: {err}")
+        print(f"  server_name={self.server_name} host={self.addr[0]} port={self.addr[1]}")
+        if self._is_ip_address(self.addr[0]):
+            print(
+                "  目前使用 IP 連線，請確認伺服器憑證的 SubjectAltName 包含該 IP，"
+                "或改用 --server-name 指定憑證中的 DNS 名稱並確保可解析。"
+            )
+        else:
+            print(
+                "  請確認伺服器憑證的 SubjectAltName/DNS 名稱包含上述 server_name，"
+                "並與 --server-name 設定一致。"
+            )
+
+    def _handle_ssl_error(self, err: ssl.SSLError) -> None:
+        print("[CLIENT] TLS 連線錯誤:")
+        print(f"  錯誤: {err}")
+        print(f"  server_name={self.server_name} host={self.addr[0]} port={self.addr[1]}")
+        print(
+            "  建議檢查客戶端與伺服器是否都啟用 TLS、TLS 版本與加密套件是否相容，"
+            "以及憑證/金鑰是否正確。"
+        )
+
+    @staticmethod
+    def _is_ip_address(value: str) -> bool:
+        try:
+            ipaddress.ip_address(value)
+            return True
+        except ValueError:
+            return False
 
     def _recv_loop(self):
         f = self.sock.makefile("r", encoding=ENC, newline="\n")
@@ -759,8 +845,33 @@ def main():
         action="store_true",
         help="enable taskbar flash debug logging",
     )
+    ap.add_argument(
+        "--ca",
+        help="path to CA certificate in PEM format",
+    )
+    ap.add_argument(
+        "--server-name",
+        help="override server name used for TLS SNI and hostname verification",
+    )
+    ap.add_argument(
+        "--insecure",
+        action="store_true",
+        help="disable TLS certificate verification",
+    )
     args = ap.parse_args()
-    ChatClientTUI(args.host, args.port, args.name, flash_debug=args.flash_debug).start()
+    if args.ca and args.insecure:
+        ap.error("--ca 與 --insecure 不可同時使用")
+
+    ca_path = os.path.expanduser(args.ca) if args.ca else None
+    ChatClientTUI(
+        args.host,
+        args.port,
+        args.name,
+        flash_debug=args.flash_debug,
+        ca_path=ca_path,
+        server_name=args.server_name,
+        insecure=args.insecure,
+    ).start()
 
 if __name__ == "__main__":
     main()
