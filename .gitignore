@@ -1,3 +1,5 @@
 *.crt
 *.key
 __pycache__
+CACertificate
+LocalCertificate
