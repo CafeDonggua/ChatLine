@@ -69,6 +69,23 @@ class ChatServer:
                 except Exception:
                     self._drop_client(c)
 
+    def _send_roster(self, conn):
+        with self.lock:
+            users = sorted(info["name"] for info in self.clients.values())
+        payload = {
+            "type": "roster",
+            "users": users,
+            "ts": self._ts_now()
+        }
+        data = (json.dumps(payload) + "\n").encode(ENC)
+        try:
+            conn.sendall(data)
+            return True
+        except Exception:
+            with self.lock:
+                self._drop_client(conn)
+            return False
+
     def _drop_client(self, conn):
         info = self.clients.get(conn)
         if info:
@@ -103,6 +120,9 @@ class ChatServer:
                 "ts": self._ts_now()
             })
 
+            if not self._send_roster(conn):
+                return
+
             # 收訊息迴圈
             for line in f:
                 try:
@@ -122,6 +142,9 @@ class ChatServer:
                     self._broadcast(payload)
                 elif mtype == "leave":
                     break
+                elif mtype == "list":
+                    if not self._send_roster(conn):
+                        break
 
         except Exception:
             pass
