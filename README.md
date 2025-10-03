@@ -78,8 +78,10 @@ python chat_client_tui.py --host 127.0.0.1 --port 5050 --name Bob --insecure
 2. 建立 CA 憑證：
 
    ```powershell
-   MSYS2_ARG_CONV_EXCL='*' openssl req -x509 -new -key CACertificate/ca.key -sha256 -days 3650 -out CACertificate/ca.crt -subj "/CN=lan-chat-ca"
+   MSYS2_ARG_CONV_EXCL='*' openssl req -x509 -new -key CACertificate/ca.key -sha256 -days 3650 -out CACertificate/ca.crt -subj "/CN=lan-chat-ca" -addext "basicConstraints=critical,CA:TRUE" -addext "keyUsage=critical,keyCertSign,cRLSign" -addext "subjectKeyIdentifier=hash"
    ```
+
+   * 請將產生的 `CACertificate/ca.crt` 提供給所有需要驗證伺服器的客戶端，並同時保留此檔案於 `CACertificate` 資料夾中供伺服器使用。
 
 3. 產生伺服器 CSR：
 
@@ -91,7 +93,13 @@ python chat_client_tui.py --host 127.0.0.1 --port 5050 --name Bob --insecure
 
    ```powershell
    cat > CACertificate/san.cnf <<'EOF'
+   basicConstraints = critical,CA:FALSE
+   keyUsage = critical, digitalSignature, keyEncipherment
+   extendedKeyUsage = serverAuth
+   subjectKeyIdentifier = hash
+   authorityKeyIdentifier = keyid,issuer
    subjectAltName = @alt_names
+
    [alt_names]
    DNS.1 = chat.local
    IP.1  = 192.168.47.33
@@ -101,7 +109,7 @@ python chat_client_tui.py --host 127.0.0.1 --port 5050 --name Bob --insecure
 5. 由 CA 簽發伺服器憑證：
 
    ```powershell
-   openssl x509 -req -in CACertificate/server.csr -CA CACertificate/ca.crt -CAkey CACertificate/ca.key -CAcreateserial -out CACertificate/server.crt -days 825 -sha256 -extfile CACertificate/san.cnf
+   MSYS2_ARG_CONV_EXCL='*' openssl x509 -req -in CACertificate/server.csr -CA CACertificate/ca.crt -CAkey CACertificate/ca.key -CAcreateserial -out CACertificate/server.crt -days 825 -sha256 -extfile CACertificate/san.cnf
    ```
 
 6. 啟動伺服器與驗證客戶端：
@@ -247,4 +255,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
