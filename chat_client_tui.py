@@ -609,6 +609,10 @@ class ChatClientTUI:
                 self.running = False
                 event.app.exit()  # 關閉 TUI
                 return
+            if txt == "/list":
+                self._send_json({"type": "list"})
+                self.input.text = ""
+                return
             self._send_json({"type": "chat", "text": txt})
             self.input.text = ""  # 清空輸入列
 
@@ -676,7 +680,6 @@ class ChatClientTUI:
 
         # 起始提示
         self._append_system(f"Connected to {self.addr[0]}:{self.addr[1]} as {self.name}")
-        self._append_system("Type /exit to leave.")
         if self._insecure_mode:
             reason = self._insecure_reason or "未指定 --ca"
             self._append_system(f"警告: 目前為不驗證模式（{reason}）")
@@ -766,8 +769,13 @@ class ChatClientTUI:
             self._maybe_flash_for_new_entry()
         elif mtype == "system":
             text = msg.get("text", "")
-            self._append_entry(ChatEntry(user="SYSTEM", text=text, ts=ts))
-            self._maybe_flash_for_new_entry()
+            self._append_system_with_ts(text, ts)
+        elif mtype == "roster":
+            users = msg.get("users")
+            if not isinstance(users, list):
+                users = []
+            roster_text = self._format_roster_line(users)
+            self._append_system_with_ts(roster_text, ts)
 
     def _append_entry(self, entry: ChatEntry):
         try:
@@ -817,16 +825,30 @@ class ChatClientTUI:
         view_end = snap.get("view_end", 0)
         position = f"{view_end}/{total}" if total else "0/0"
         state = "最新" if snap.get("follow_bottom", True) else "已回捲"
-        return (
-            "滑鼠滾輪 或 PgUp/PgDn 捲動，Ctrl+Home 至頂，Ctrl+End 至底 | "
-            f"{position} {state}"
-        )
+        tips_scroll = "滑鼠滾輪 或 PgUp/PgDn 捲動，Ctrl+Home 至頂，Ctrl+End 至底"
+        tips_cmd = "/list 顯示名單 /exit 離開"
+        return f"{tips_scroll} | {tips_cmd} | {position} {state}"
 
 
     def _append_system(self, text: str):
         ts = datetime.datetime.now().strftime("%m.%d %H:%M")
+        self._append_system_with_ts(text, ts)
+
+    def _append_system_with_ts(self, text: str, ts: str):
         self._append_entry(ChatEntry(user="SYSTEM", text=text, ts=ts))
         self._maybe_flash_for_new_entry()
+
+    def _format_roster_line(self, users: List[object]) -> str:
+        formatted = []
+        for u in users:
+            uname = str(u)
+            if uname == self.name:
+                formatted.append(f"{uname} (you)")
+            else:
+                formatted.append(uname)
+        if not formatted:
+            return "Online: (none)"
+        return "Online: " + ", ".join(formatted)
 
     def _send_json(self, obj: dict):
         try:
