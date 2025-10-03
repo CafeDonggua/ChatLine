@@ -33,13 +33,87 @@ python -m pip install --upgrade prompt_toolkit wcwidth
 
 ## TLS 憑證準備
 
-伺服器啟動前請先在與 `chat_server.py` 相同的資料夾建立自簽憑證與私鑰：
+下面提供兩種情境：快速本機測試（自簽、客戶端略過驗證）與建立 CA + 正式簽發的伺服器憑證（客戶端可驗證）。請依需求擇一或全部完成。
+憑證生成的部分請使用 Git Bash 執行。
+
+### A. LocalCertificate：快速本機測試（不驗證模式）
+
+建立憑證資料夾並產生伺服器自簽憑證：
 
 ```powershell
-MSYS2_ARG_CONV_EXCL='*' openssl req -x509 -newkey rsa:2048 -keyout server.key -out server.crt -days 365 -nodes -subj "/CN=chat.local"
+mkdir LocalCertificate
+MSYS2_ARG_CONV_EXCL='*' openssl req -x509 -newkey rsa:2048 -keyout LocalCertificate/server.key -out LocalCertificate/server.crt -days 365 -nodes -subj "/CN=chat.local"
 ```
 
-完成後會得到 `server.crt` 與 `server.key`，啟動伺服器時需透過參數載入；客戶端會自動建立 TLS 連線，不需額外設定。
+啟動伺服器：
+
+```powershell
+python chat_server.py --host 127.0.0.1 --port 5050 --cert LocalCertificate/server.crt --key LocalCertificate/server.key
+```
+
+客戶端若未指定 `--ca`，預設會停留在不驗證模式（與舊版相容）。可直接啟動：
+
+```powershell
+python chat_client_tui.py --host 127.0.0.1 --port 5050 --name Alice
+```
+
+或手動標示目前為不驗證連線：
+
+```powershell
+python chat_client_tui.py --host 127.0.0.1 --port 5050 --name Bob --insecure
+```
+
+首次連線會在 TUI 顯示「不驗證模式」警告，提醒僅適用於開發／內網。
+
+### B. CACertificate：建立自有 CA 以啟用客戶端驗證
+
+1. 建立資料夾並產生 CA 與伺服器金鑰：
+
+   ```powershell
+   mkdir CACertificate
+   openssl genrsa -out CACertificate/ca.key 4096
+   openssl genrsa -out CACertificate/server.key 2048
+   ```
+
+2. 建立 CA 憑證：
+
+   ```powershell
+   MSYS2_ARG_CONV_EXCL='*' openssl req -x509 -new -key CACertificate/ca.key -sha256 -days 3650 -out CACertificate/ca.crt -subj "/CN=lan-chat-ca"
+   ```
+
+3. 產生伺服器 CSR：
+
+   ```powershell
+   MSYS2_ARG_CONV_EXCL='*' openssl req -new -key CACertificate/server.key -out CACertificate/server.csr -subj "/CN=chat.local"
+   ```
+
+4. 建立 SubjectAltName 設定檔：
+
+   ```powershell
+   cat > CACertificate/san.cnf <<'EOF'
+   subjectAltName = @alt_names
+   [alt_names]
+   DNS.1 = chat.local
+   IP.1  = 192.168.47.33
+   EOF
+   ```
+
+5. 由 CA 簽發伺服器憑證：
+
+   ```powershell
+   openssl x509 -req -in CACertificate/server.csr -CA CACertificate/ca.crt -CAkey CACertificate/ca.key -CAcreateserial -out CACertificate/server.crt -days 825 -sha256 -extfile CACertificate/san.cnf
+   ```
+
+6. 啟動伺服器與驗證客戶端：
+
+   ```powershell
+   python chat_server.py --host 127.0.0.1 --port 5050 --cert CACertificate\server.crt --key CACertificate\server.key
+   python chat_client_tui.py --host 127.0.0.1 --ca CACertificate\ca.crt --server-name chat.local --port 5050 --name Alice
+   ```
+
+   * `--ca` 指定 CA 憑證後會強制啟用驗證與主機名比對。
+   * `--server-name` 控制 SNI 與憑證主機名驗證，可與實際連線的 `--host` 不同（例如 `--host` 使用 IP）。
+   * 若使用 IP 連線，請確保 SAN 內含對應 IP（如上例的 `IP.1`）。
 
 ## 啟動方式
 
@@ -48,7 +122,7 @@ MSYS2_ARG_CONV_EXCL='*' openssl req -x509 -newkey rsa:2048 -keyout server.key -o
 伺服器（視窗 A）：
 
 ```powershell
-python chat_server.py --host 127.0.0.1 --port 5050 --cert server.crt --key server.key
+python chat_server.py --host 127.0.0.1 --port 5050 --cert LocalCertificate/server.crt --key LocalCertificate/server.key
 ```
 
 客戶端（視窗 B、C 各開一個）：
@@ -69,12 +143,12 @@ ipconfig   # 取 IPv4，例如 192.168.1.23
 伺服器（綁所有介面或綁該 IPv4）：
 
 ```powershell
-python chat_server.py --host 0.0.0.0 --port 5050 --cert server.crt --key server.key
+python chat_server.py --host 0.0.0.0 --port 5050 --cert LocalCertificate/server.crt --key LocalCertificate/server.key
 # 或
-# python chat_server.py --host 192.168.1.23 --port 5050 --cert server.crt --key server.key
+# python chat_server.py --host 192.168.1.23 --port 5050 --cert LocalCertificate/server.crt --key LocalCertificate/server.key
 ```
 
-本機客戶端：
+本機客戶端（不驗證，維持開發體驗）：
 
 ```powershell
 python chat_client_tui.py --host 127.0.0.1 --port 5050 --name LocalMe
@@ -85,6 +159,8 @@ python chat_client_tui.py --host 127.0.0.1 --port 5050 --name LocalMe
 ```powershell
 python chat_client_tui.py --host 192.168.1.23 --port 5050 --name RemoteMe
 ```
+
+若要使用 CA 驗證，請改用上節的 `CACertificate` 憑證並於客戶端加入 `--ca` 與 `--server-name`。
 
 首次執行若跳出 Windows 防火牆對話框，允許「私人網路」。
 
@@ -97,7 +173,9 @@ python chat_client_tui.py --host 192.168.1.23 --port 5050 --name RemoteMe
 
 額外參數：
 
-* 若想觀察工作列閃爍行為的除錯資訊，可在啟動客戶端時加入 `--flash-debug`，日誌會以 `[FLASH]` 前綴顯示於終端畫面。
+* `--flash-debug`：觀察工作列閃爍除錯資訊，日誌會以 `[FLASH]` 顯示。
+* `--insecure`：明確切換到不驗證模式，適用於開發或初次連線。未指定 `--ca` 時預設即為不驗證，但會在 TUI 顯示提醒。
+* `--ca / --server-name`：啟用 TLS 憑證驗證與主機名比對（詳見「TLS 憑證準備」章節）。
 
 ## 設計重點
 
@@ -137,10 +215,10 @@ python chat_client_tui.py --host 192.168.1.23 --port 5050 --name RemoteMe
 * 系統訊息：加入與離開
 * TUI 輸入與歷史視窗分離
 * CJK 寬度感知的對齊與裁切
+* 客戶端支援 TLS 憑證驗證與主機名比對（`--ca` / `--server-name` / `--insecure`）
 
 ## 待辦與方向
 
-* 主機名驗證
 * 訊息長度限制與簡單限流
 * 房間與在線名單（/rooms, /who）
 * 歷史補送、伺服器日誌輪替
@@ -169,3 +247,4 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
