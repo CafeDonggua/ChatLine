@@ -397,6 +397,23 @@ class ChatHistory:
 
         self._notify_change()
 
+    def clear(self) -> None:
+        with self.lock:
+            if not self.entries and self.view_start == 0 and self.follow_bottom:
+                return
+            self.entries.clear()
+            self.view_start = 0
+            self.follow_bottom = True
+            self._last_snapshot = {
+                "total": 0,
+                "view_start": 0,
+                "view_end": 0,
+                "follow_bottom": True,
+                "height": max(1, self.last_height),
+            }
+
+        self._notify_change()
+
     def render(self, width: int, height: int) -> List[str]:
         height = max(1, height)
         with self.lock:
@@ -613,6 +630,10 @@ class ChatClientTUI:
                 self._send_json({"type": "list"})
                 self.input.text = ""
                 return
+            if txt == "/clear":
+                self.history.clear()
+                self.input.text = ""
+                return
             self._send_json({"type": "chat", "text": txt})
             self.input.text = ""  # 清空輸入列
 
@@ -826,7 +847,7 @@ class ChatClientTUI:
         position = f"{view_end}/{total}" if total else "0/0"
         state = "最新" if snap.get("follow_bottom", True) else "已回捲"
         tips_scroll = "滑鼠滾輪 或 PgUp/PgDn 捲動，Ctrl+Home 至頂，Ctrl+End 至底"
-        tips_cmd = "/list 顯示名單 /exit 離開"
+        tips_cmd = "/list 顯示名單 /clear 清空畫面 /exit 離開"
         return f"{tips_scroll} | {tips_cmd} | {position} {state}"
 
 
