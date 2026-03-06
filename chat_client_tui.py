@@ -369,7 +369,7 @@ class ChatHistory:
         self.follow_bottom = True
         self.last_height = 0
         self.lock = threading.Lock()
-        self.on_change: Callable[[], None] | None = None
+        self.on_change: Optional[Callable[[], None]] = None
         self._last_snapshot = {
             "total": 0,
             "view_start": 0,
@@ -378,7 +378,7 @@ class ChatHistory:
             "height": 0,
         }
 
-    def set_on_change(self, callback: Callable[[], None] | None) -> None:
+    def set_on_change(self, callback: Optional[Callable[[], None]]) -> None:
         self.on_change = callback
 
     def append(self, entry: ChatEntry) -> None:
@@ -492,7 +492,7 @@ class ChatHistory:
         total = len(self.entries)
         return max(0, total - height)
 
-    def _clamp_view_start(self, value: int, height_hint: int | None = None) -> int:
+    def _clamp_view_start(self, value: int, height_hint: Optional[int] = None) -> int:
         height = self.last_height if height_hint is None else height_hint
         max_start = self._max_start(height)
         return max(0, min(value, max_start))
@@ -513,7 +513,7 @@ class ChatHistoryControl(UIControl):
     def is_focusable(self) -> bool:
         return False
 
-    def create_content(self, width: int, height: int | None) -> UIContent:
+    def create_content(self, width: int, height: Optional[int]) -> UIContent:
         real_height = height if height and height > 0 else self._last_height
         real_height = max(1, real_height)
         self._last_height = real_height
